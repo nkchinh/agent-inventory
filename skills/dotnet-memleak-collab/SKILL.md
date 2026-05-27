@@ -62,17 +62,21 @@ If the developer already has a `.dmp` file: ask for the path and jump to Stage 2
 
 ## Stage 1: Setup & Collect
 
-**Goal:** Install dotnet-dump if needed, identify the correct process, and capture a dump
-while the symptom is active.
+**Goal:** Install dotnet-dump if needed, identify the correct process, capture a dump,
+and determine whether the leak is already visible — before asking the developer to do
+anything in the app.
 
 ### Step 1: Triage
 
-Ask the developer only what the agent cannot determine from code or the environment:
+Ask the developer only what cannot be determined from code or the environment:
 
 1. What exactly is the symptom? (memory grows without bound / OOM crash / app hangs /
    abnormally high stable baseline)
-2. Which flow in the app typically causes this? (needed to know what to trigger)
-3. Is the app running right now, or does the developer need to start it first?
+2. Is the app running right now, or does the developer need to start it first?
+
+Do not ask how to reproduce the leak yet. The agent collects a dump first and checks
+whether the leak is already visible. Only if the heap looks clean does it make sense to
+ask the developer to trigger load.
 
 While waiting for the answer, the agent proactively reads the project structure, identifies
 the app type (.NET version, hosting model), and checks whether dotnet-dump is installed.
@@ -103,9 +107,12 @@ dotnet-dump ps
 - Multiple processes → match by command-line args. If still ambiguous, ask the developer
 - No processes → ask whether the app is actually running
 
-### Step 4: Collect the dump
+### Step 4: Collect a first dump immediately
 
-Choose dump type based on the symptom:
+Do not ask the developer to trigger any load yet. Collect a dump right away to establish
+a baseline and check whether the leak is already visible.
+
+Choose dump type based on the reported symptom:
 
 | Symptom | Type | Reason |
 |---|---|---|
@@ -114,23 +121,23 @@ Choose dump type based on the symptom:
 | Hang / deadlock | `Mini` | Thread stacks only, fast to collect |
 | Production with PII concern | `Triage` | Like Mini but with PII stripped |
 
-Before collecting, inspect the project structure to choose a sensible output path:
+Inspect the project structure to choose a sensible output path:
 - If `diagnostics/`, `dumps/`, or similar exists → use it
-- Otherwise → use `/tmp` (Linux/macOS) or `%TEMP%` (Windows)
+- Otherwise → `/tmp` (Linux/macOS) or `%TEMP%` (Windows)
 
 **Notify the developer before running:**
-> *"About to collect a Heap dump. Memory usage will spike briefly during collection —
+> *"I'm about to collect a Heap dump. Memory will spike briefly during collection —
 > if the app is in a container with a tight memory limit it may get killed. Let me know
-> if you need to adjust the limit first."*
+> if you need to adjust anything first."*
 
-Then the agent collects:
+Agent collects:
 ```bash
-dotnet-dump collect -p <PID> --type Heap -o <chosen-path>/memleak.dmp
+dotnet-dump collect -p <PID> --type Heap -o <chosen-path>/memleak_1.dmp
 ```
 
 Confirm the file exists and is non-empty:
 ```bash
-ls -lh <chosen-path>/memleak.dmp
+ls -lh <chosen-path>/memleak_1.dmp
 ```
 
 **If collect fails:**
@@ -138,12 +145,27 @@ ls -lh <chosen-path>/memleak.dmp
 - Timeout on Linux/macOS → `TMPDIR` mismatch. See `references/troubleshooting.md`
 - Running in a container → see `references/docker.md`
 
-**When to ask the developer during Stage 1:**
-If memory is not yet elevated (app just restarted, no traffic yet), ask the developer to
-trigger the leaking flow before collecting:
-> *"The heap looks clean right now — the leak hasn't materialized yet. Please [trigger
-> flow X / call endpoint Y ~10 times] to build up enough pressure, then let me know
-> and I'll collect immediately."*
+### Step 5: Quick heap check — decide whether to ask for load
+
+Immediately run a quick heap check on the first dump:
+```bash
+dotnet-dump analyze <path>/memleak_1.dmp -c "dumpheap -stat"
+```
+
+**If the leak is already visible** (suspicious app types with high Count or TotalSize):
+→ Proceed directly to Stage 2 with this dump. No need to ask the developer to do anything.
+
+**If the heap looks clean** (no suspicious accumulation, memory appears normal):
+→ The leak has not materialized yet. Now ask the developer to trigger the relevant flow:
+> *"The heap looks clean at this point — the leak hasn't built up enough to be visible
+> yet. Could you [perform action X / navigate to screen Y / run workflow Z] several
+> times to reproduce the memory growth? Let me know when done and I'll collect another
+> dump immediately."*
+
+After the developer confirms, collect a second dump and proceed to Stage 2:
+```bash
+dotnet-dump collect -p <PID> --type Heap -o <chosen-path>/memleak_2.dmp
+```
 
 ---
 
