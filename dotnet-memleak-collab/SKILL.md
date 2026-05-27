@@ -11,231 +11,221 @@ description: >
 
 # .NET Memory Leak — Human-Agent Collaborative Investigation
 
-This skill structures a joint investigation session where the agent provides expert
-direction and interpretation, and the developer executes commands and reports back.
-Neither party can do it alone: the agent can't run tools on the developer's machine;
-the developer doesn't need to know which commands to run or what the output means.
+## Role Split — Read This First
 
-## When to Offer This Workflow
+The agent and the app run on the same machine, in the developer's local environment.
+The agent has CLI access, can read source code in the working directory, and can install
+and run dotnet-dump directly — no need to ask the developer to do these things.
 
-**Trigger on phrases like:**
+**Agent does autonomously — never ask the developer:**
+- Check whether dotnet-dump is installed; install it if missing
+- Run `dotnet-dump ps` to find the target PID
+- Run `dotnet-dump collect` to capture the `.dmp` file
+- Decide where to place the `.dmp` file (inspect project structure first — use
+  `diagnostics/` or `dumps/` if present, otherwise `/tmp` on Linux/macOS or
+  `%TEMP%` on Windows)
+- Run `dotnet-dump analyze` and all SOS commands to analyze the dump
+- Read source code to understand context before asking the developer anything
+
+**Must ask the developer — agent cannot do these:**
+- **Trigger behavior in the app**: call an endpoint, perform a UI action, run a specific
+  workflow to reproduce the leak — only the developer can operate the app
+- **Answer business questions** that cannot be inferred from code: "is this cache meant
+  to persist for the entire app lifetime?", "which flow typically causes this?"
+
+**Production scenario (minimal support):**
+The app runs on a separate server the agent cannot access. The developer collects the
+dump on the server, copies it to their local machine, and provides the file path. The
+agent analyzes from that file — all subsequent steps proceed as normal.
+
+---
+
+## When to Trigger This Skill
+
+**Trigger on:**
 - "memory keeps growing", "OOM crash", "heap too large", "GC not collecting"
 - "threads are stuck", "app hangs", "deadlock"
 - "I have a .dmp file", "can you analyze this dump"
 - "how do I find a memory leak in .NET"
 
-**Opening offer:**
+**Opening:**
 
-Offer the developer a structured investigation session. Explain there are three stages:
+Briefly confirm the plan and outline three stages:
+1. **Setup & Collect** — install dotnet-dump if needed, capture a dump while the symptom
+   is active
+2. **Investigate** — analyze the dump, trace the root cause
+3. **Fix** — produce a specific code fix and a way to verify it worked
 
-1. **Setup & Collect** — understand the environment, install dotnet-dump if needed,
-   capture a memory dump while the problem is active
-2. **Investigate Together** — run targeted commands inside the dump, with the agent
-   interpreting each result and deciding what to look at next
-3. **Root Cause & Fix** — identify the exact source of the leak or deadlock and produce
-   a specific fix
-
-Explain the ground rules: the developer runs commands and pastes output; the agent
-interprets and decides the next step. The developer doesn't need to understand the
-output — that's the agent's job.
-
-Ask if they want to try this structured approach, or prefer to work freeform.
-
-If they decline, work freeform using the reference files as needed.
-If they accept, proceed to Stage 1.
+If the developer already has a `.dmp` file: ask for the path and jump to Stage 2.
 
 ---
 
 ## Stage 1: Setup & Collect
 
-**Goal:** Understand the environment and obtain a usable memory dump while the symptom
-is active.
+**Goal:** Install dotnet-dump if needed, identify the correct process, and capture a dump
+while the symptom is active.
 
-### Step 1: Triage questions
+### Step 1: Triage
 
-Ask these questions together in one message — the developer can answer in shorthand:
+Ask the developer only what the agent cannot determine from code or the environment:
 
-1. What's the symptom? (memory grows without bound / OOM crash / app hangs / high
-   baseline memory that never drops)
-2. What type of app? (ASP.NET Core, Worker Service, WinForms, console, other)
-3. Where is it running? (local machine, Docker, Kubernetes, Windows service, VM)
-4. .NET version?
-5. Is the problem happening right now, or intermittent?
-6. Do they already have a `.dmp` or `core` dump file?
+1. What exactly is the symptom? (memory grows without bound / OOM crash / app hangs /
+   abnormally high stable baseline)
+2. Which flow in the app typically causes this? (needed to know what to trigger)
+3. Is the app running right now, or does the developer need to start it first?
 
-**If they already have a dump file:** Skip to Stage 2 immediately.
+While waiting for the answer, the agent proactively reads the project structure, identifies
+the app type (.NET version, hosting model), and checks whether dotnet-dump is installed.
 
-**If the problem is intermittent:** Ask what triggers it and how long before the symptom
-is visible. The dump must be collected while memory is elevated — not before or after.
+### Step 2: Check and install dotnet-dump
 
-### Step 2: Check dotnet-dump
-
-Ask the developer to run:
-
-```
+Agent runs:
+```bash
 dotnet tool list --global
 ```
 
-Paste the output. If `dotnet-dump` is not listed, provide the install command appropriate
-for their situation:
-
-- **Has .NET SDK:**
-  ```
+- `dotnet-dump` listed → already installed, proceed
+- Not listed → install immediately:
+  ```bash
   dotnet tool install --global dotnet-dump
   ```
-
-- **No SDK (binary download):** Give the direct download link for their platform.
-  See `references/install.md` for per-platform commands.
-
-- **Docker/Kubernetes:** The tool must be installed inside the container.
-  Read `references/docker.md` and follow the container guide before continuing.
-
-Confirm installation by asking them to run `dotnet-dump --version`.
+- No .NET SDK available → use the direct binary download for the platform.
+  See `references/install.md`.
 
 ### Step 3: Identify the target process
 
-```
+Agent runs:
+```bash
 dotnet-dump ps
 ```
 
-Ask them to paste the full output. From the output, identify the correct process together:
-- Match by process name and command-line args
-- If multiple dotnet processes, ask the developer to confirm which one is the app in question
+- Single dotnet process → use that PID
+- Multiple processes → match by command-line args. If still ambiguous, ask the developer
+- No processes → ask whether the app is actually running
 
-Tell them the PID to use before moving on.
+### Step 4: Collect the dump
 
-### Step 4: Choose dump type and collect
-
-Choose the dump type based on the symptom:
+Choose dump type based on the symptom:
 
 | Symptom | Type | Reason |
 |---|---|---|
-| Memory leak / OOM | `Heap` | Contains full object graph, excludes native module images |
-| Crash / unhandled exception | `Full` | Needed for complete state reconstruction |
-| Hang / deadlock | `Mini` | Thread stacks only — fast to collect and analyze |
-| Production (PII concern) | `Triage` | Like Mini but with PII stripped |
+| Memory leak / OOM | `Heap` | Full object graph, no native module images |
+| Crash / unhandled exception | `Full` | Complete process state |
+| Hang / deadlock | `Mini` | Thread stacks only, fast to collect |
+| Production with PII concern | `Triage` | Like Mini but with PII stripped |
 
-Give the developer the exact command with the PID filled in:
+Before collecting, inspect the project structure to choose a sensible output path:
+- If `diagnostics/`, `dumps/`, or similar exists → use it
+- Otherwise → use `/tmp` (Linux/macOS) or `%TEMP%` (Windows)
 
+**Notify the developer before running:**
+> *"About to collect a Heap dump. Memory usage will spike briefly during collection —
+> if the app is in a container with a tight memory limit it may get killed. Let me know
+> if you need to adjust the limit first."*
+
+Then the agent collects:
+```bash
+dotnet-dump collect -p <PID> --type Heap -o <chosen-path>/memleak.dmp
 ```
-dotnet-dump collect -p <PID> --type Heap -o memleak.dmp
+
+Confirm the file exists and is non-empty:
+```bash
+ls -lh <chosen-path>/memleak.dmp
 ```
 
-**Before they run it, warn them:**
-- Full/Heap dumps may temporarily spike memory — in containers, this can trigger OOM
-  termination. Recommend temporarily raising the container memory limit if applicable.
-- On Linux/macOS: `dotnet-dump` and the target process must share the same `TMPDIR`.
-  If collection times out, see `references/troubleshooting.md`.
-- `dotnet-dump` must run as the same OS user as the dotnet process, or as root.
+**If collect fails:**
+- Permission error → try with `sudo`, or check the process owner: `ps aux | grep dotnet`
+- Timeout on Linux/macOS → `TMPDIR` mismatch. See `references/troubleshooting.md`
+- Running in a container → see `references/docker.md`
 
-Ask them to paste the last 3 lines of output to confirm success, and to run:
-```
-ls -lh memleak.dmp
-```
-to confirm the file is non-zero size.
-
-**Exit condition for Stage 1:**
-A `.dmp` or `core` file is confirmed on disk and non-empty. Proceed to Stage 2.
+**When to ask the developer during Stage 1:**
+If memory is not yet elevated (app just restarted, no traffic yet), ask the developer to
+trigger the leaking flow before collecting:
+> *"The heap looks clean right now — the leak hasn't materialized yet. Please [trigger
+> flow X / call endpoint Y ~10 times] to build up enough pressure, then let me know
+> and I'll collect immediately."*
 
 ---
 
-## Stage 2: Investigate Together
+## Stage 2: Investigate
 
-**Goal:** Systematically identify what is consuming memory and why the GC cannot
-reclaim it.
+**Goal:** Identify which type is consuming memory and why the GC cannot reclaim it.
 
-**Instructions to developer at the start of this stage:**
-
-Explain the ground rules for this stage:
-
-> *"For each step I'll tell you: (1) what command to run, (2) what it does in one sentence,
-> and (3) what I'm looking for. You run the command and paste the full output — don't
-> truncate even if it's long. I'll interpret it and tell you what's next.
-> You don't need to understand the output yourself."*
-
-### Step 1: Open the dump
-
-```
-dotnet-dump analyze memleak.dmp
+The agent runs all SOS commands autonomously using non-interactive mode:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "<command>"
 ```
 
-Ask them to paste the prompt that appears (should be `>`). This confirms the session opened
-successfully.
+The developer is only needed when the agent has a business question or needs additional
+behavior triggered in the app.
 
-Then run the first diagnostic command:
+### Step 1: Runtime sanity check
 
-```
-eeversion
-```
-
-This confirms the .NET runtime version and that SOS loaded correctly. If SOS errors appear
-here, read `references/troubleshooting.md` — fix before continuing.
-
-### Step 2: Baseline — the most important command
-
-```
-dumpheap -stat
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "eeversion"
 ```
 
-Ask for **full output**. This is the foundation of the entire investigation.
+Confirms the .NET runtime version and that SOS loaded correctly. If SOS errors appear,
+see `references/troubleshooting.md` before continuing.
 
-**How to interpret — do this analysis before responding:**
+### Step 2: Baseline heap — most important command
+
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -stat"
+```
+
+Analyze the full output before reporting anything:
 
 1. Sort mentally by `TotalSize` (rightmost column)
-2. Find the top 3-5 types by total memory consumed
-3. Separate application types (app namespace) from framework types (`System.*`)
-4. Note any type with Count > 50,000 or TotalSize > 50 MB
-5. Look for patterns: arrays growing large, collections, anything with "Cache", "Session",
-   "Handler", "Context" in the name
+2. Find the top 3–5 types by total memory consumed
+3. Separate app types (app namespace) from framework types (`System.*`)
+4. Flag any type with Count > 50,000 or TotalSize > 50 MB
+5. Note names containing: Cache, Session, Handler, Context, Manager, Repository
 
-**Tell the developer:**
+Cross-reference with source code: find the corresponding class, read the implementation,
+and form an initial hypothesis before running the next command.
+
+Report to the developer:
 - What the top consumers are
-- Which ones look suspicious and why
-- Your current hypothesis (e.g., *"200,000 Customer objects consuming 4.8 MB suggests
-   something is holding a collection of customers that should have been released"*)
+- Which types look suspicious and why
+- Current hypothesis in plain language
 - What the next command will test
 
 ### Step 3: Drill into the suspect type
 
-For the most suspicious type from Step 2:
-
-```
-dumpheap -type <PartialTypeName> -stat
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <PartialTypeName> -stat"
 ```
 
-Then get instance addresses:
-
-```
-dumpheap -type <PartialTypeName>
-```
-
-Pick **2-3 addresses** from the output. Tell the developer which addresses to use for the
-next step.
-
-### Step 4: Find why objects aren't being collected
-
-This is the core diagnostic question. For each address:
-
-```
-gcroot <address>
+Get instance addresses:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <PartialTypeName>"
 ```
 
-Ask them to paste the full output. `gcroot` traces the reference chain from the GC root
-to this object — it answers *"why can't the GC collect this?"*
+Pick 2–3 addresses to continue with.
 
-**Interpret the root type and branch to the matching investigation path:**
+### Step 4: Find why the GC cannot collect it
 
-| Root chain shows... | Interpretation | Investigation path |
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "gcroot <address>"
+```
+
+This is the core diagnostic question: *why is this object still alive?*
+
+Interpret the root chain and branch to the matching investigation path:
+
+| Root chain shows | Interpretation | Path |
 |---|---|---|
-| `static` field anywhere in chain | Static collection holding references | → Path A |
-| `delegate` / event handler in chain | Publisher holding subscriber alive | → Path B |
-| `Finalizer` / finalizer queue | Disposable not being disposed | → Path C |
+| `static` field | Static collection holding references | → Path A |
+| `delegate` / event | Publisher keeping subscriber alive | → Path B |
+| Finalizer queue | IDisposable never called | → Path C |
 | `Timer` callback | Timer holding outer object alive | → Path D |
-| async state machine / `Task` | Incomplete async chain | → Path E |
-| `Thread` → local var (top frame active) | Expected — object in use right now | Run on a different instance |
-| No roots found | Object IS collectible — leak is creation rate, not retention | → Path F |
+| Async state machine / Task | Incomplete async chain | → Path E |
+| Thread → active local var | Object currently in use — expected | Try another address |
+| No roots found | Object IS collectible — creation rate is the issue | → Path F |
 
-State the interpretation and hypothesis to the developer before running the next command.
+Before branching: cross-reference the gcroot chain with source code. The class and field
+responsible for holding the reference are usually visible immediately.
 
 ---
 
@@ -246,330 +236,211 @@ State the interpretation and hypothesis to the developer before running the next
 **Hypothesis:** A static field holds a collection that accumulates objects and is never
 cleared.
 
-Ask the developer to run:
-```
-dumpobj <root-owner-address>
-```
-(use the address of the static owner from the gcroot chain)
-
-Look at its fields for `List<T>`, `Dictionary<K,V>`, `ConcurrentDictionary`, `Queue<T>`.
-If found, check the item count in those collection fields.
-
-Then ask:
-```
-dumpobj <collection-address>
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpobj <root-owner-address>"
 ```
 
-Walk the chain until the static field is identified. Report the full path:
-`MyApp.SomeClass._staticField → Dictionary<string,T> → T[]`
+Look for fields of type `List<T>`, `Dictionary<K,V>`, `ConcurrentDictionary`, `Queue<T>`.
+Read the source code of that class: is there an eviction or expiry policy? Is this
+collection ever cleared?
 
-**Fix pattern to suggest:**
-- Add expiry/eviction to the collection
-- Use `WeakReference<T>` or `ConditionalWeakTable<K,V>` if ownership is unclear
-- Consider if the static field should exist at all — maybe it should be scoped to a request
-  or service lifetime
+Drill deeper into the collection if needed:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpobj <collection-address>"
+```
+
+Ask the developer only when intent cannot be inferred from code:
+> *"Class `X` has a static field `_cache` of type `Dictionary<string, Y>`. I don't see
+> anywhere in the code that clears it. Is this cache meant to live for the entire app
+> lifetime, or should it be released per request or session?"*
+
+**Fix pattern:**
+- Add an eviction policy (size limit, time-based expiry)
+- Replace with `IMemoryCache` or `IDistributedCache` instead of a raw static dictionary
+- If key lifetime is tied to another object's lifetime, use `ConditionalWeakTable<K,V>`
 
 ### Path B — Event Handler
 
-**Hypothesis:** A subscriber object registered for an event but never unsubscribed.
-The publisher holds a delegate pointing to the subscriber, keeping it alive.
+**Hypothesis:** A subscriber registered for an event but never unsubscribed. The publisher
+holds a delegate pointing to the subscriber, preventing GC from collecting it.
 
-Ask the developer to run:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpdelegate <delegate-address>"
 ```
-dumpdelegate <delegate-address>
-```
-(use the delegate address from the gcroot chain)
 
-This shows the target object (subscriber) and method. Identify the subscriber type.
+Identify the subscriber type and method. Read the subscriber's source code: does it
+implement `IDisposable`? Does `Dispose()` call `-=`?
 
-Then ask about the code: where does this type subscribe to events? Is there a `Dispose()`
-method? Does it call `-=` on those events?
+Special attention: `SystemEvents.*` and `Application.*` are process-wide static events.
+Subscribing without unsubscribing leaks for the entire process lifetime.
 
-**Fix pattern to suggest:**
+Ask the developer only if the lifecycle is unclear from code:
+> *"`X` subscribes to event `Y` in its constructor. I don't see an unsubscribe anywhere.
+> What is the intended lifetime of `X` — is it ever explicitly disposed?"*
+
+**Fix pattern:**
 ```csharp
-// In the subscriber class
 public void Dispose()
 {
     publisher.SomeEvent -= OnSomeEvent;
-    // Also check: Application.Idle, SystemEvents.*, static events
+    SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
 }
 ```
-
-Special attention: `SystemEvents.*` and `Application.*` are process-wide static events —
-anything subscribing to these and not unsubscribing will leak for the lifetime of the process.
 
 ### Path C — IDisposable / Finalizer Leak
 
-**Hypothesis:** Objects with finalizers (SqlConnection, FileStream, HttpClient, etc.)
-were created but never `Dispose()`d. They sit in the finalizer queue, waiting.
+**Hypothesis:** Objects with finalizers were created but `Dispose()` was never called.
+They queue up for finalization instead of being released immediately.
 
-Ask the developer to run:
-```
-finalizequeue
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "finalizequeue"
 ```
 
-Large counts of `SqlConnection`, `FileStream`, `HttpClient`, `StreamReader`, `Timer` in
-this output confirm the hypothesis.
+Large counts of `SqlConnection`, `FileStream`, `HttpClient`, `StreamReader`, or `Timer`
+confirm the hypothesis. Follow up with a count for the specific type:
 
-Ask them to also run:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <TypeFromFinalizeQueue> -stat"
 ```
-dumpheap -type System.Data.SqlClient.SqlConnection -stat
-dumpheap -type System.IO.FileStream -stat
-```
-(adjust type names to match what appeared in finalizequeue)
 
-**Fix pattern to suggest:**
+Read the source code to find where that type is created without a `using` block or
+explicit `Dispose()` call.
+
+**Fix pattern:**
 ```csharp
-// Use 'using' — this guarantees Dispose() even on exceptions
+// Always use 'using' — guarantees Dispose() even when an exception is thrown
 using var conn = new SqlConnection(connectionString);
 using var cmd = new SqlCommand(query, conn);
-// ... work
-
-// Or explicit try/finally if you need to control lifetime across methods
-SqlConnection conn = null;
-try {
-    conn = new SqlConnection(connectionString);
-    // ... work
-} finally {
-    conn?.Dispose();
-}
 ```
 
 ### Path D — Timer Leak
 
-**Hypothesis:** A `System.Threading.Timer` (or `System.Timers.Timer`) is holding
-a delegate that captures `this`, keeping the outer object alive indefinitely.
+**Hypothesis:** A `Timer` holds a delegate that captures `this`, preventing the outer
+object from being collected.
 
-Ask the developer to run:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "timerinfo"
 ```
-timerinfo
-```
 
-Large number of timers, or timers pointing to objects that should be short-lived, confirms.
+A large timer count, or timers pointing to types that should be short-lived, confirms the
+hypothesis. Read the source code: does the owning class's `Dispose()` call
+`_timer.Dispose()`?
 
-**Fix pattern to suggest:**
+**Fix pattern:**
 ```csharp
-public class MyService : IDisposable
+public void Dispose()
 {
-    private Timer _timer;
-
-    public MyService()
-    {
-        _timer = new Timer(DoWork, null, TimeSpan.Zero, TimeSpan.FromSeconds(30));
-    }
-
-    public void Dispose()
-    {
-        _timer?.Dispose(); // Without this, _timer holds 'this' alive forever
-        _timer = null;
-    }
+    _timer?.Dispose();
+    _timer = null;
 }
 ```
 
 ### Path E — Async / Task Leak
 
-**Hypothesis:** Tasks are created but never awaited ("fire and forget"), causing them
-to accumulate. Or async state machines are stuck at an await that never completes.
+**Hypothesis:** Fire-and-forget tasks accumulate, or async state machines are stuck at
+an await that never completes.
 
-Ask the developer to run:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpasync"
 ```
-dumpasync
-```
-
-Then:
-```
-dumpheap -type System.Threading.Tasks.Task -stat
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type System.Threading.Tasks.Task -stat"
 ```
 
-If Task count is very high, look at the await points in `dumpasync` output. Many state
-machines stuck at the same await point indicates a bottleneck or resource exhaustion
-preventing completion.
+Many state machines stuck at the same await point indicates resource exhaustion blocking
+completion. Read the code around that await: is there a timeout? A `CancellationToken`?
 
-**Fix pattern to suggest:**
-- Avoid fire-and-forget: `_ = DoWorkAsync()` → replace with `await DoWorkAsync()`
-- Add `CancellationToken` to allow cleanup of stuck tasks
-- Use bounded channels or `SemaphoreSlim` to limit concurrent async work
+If more data is needed: ask the developer to trigger the flow that creates async work,
+then collect a fresh dump.
+
+**Fix pattern:**
+- Replace `_ = DoWorkAsync()` with `await DoWorkAsync()`
+- Use a bounded `Channel<T>` for intentional background work
+- Add `CancellationToken` and timeouts to long-running operations
 
 ### Path F — High Object Creation Rate
 
-**Hypothesis:** Objects are collectible (no GC roots holding them), but they're being
-created so fast that GC can't keep up, causing temporary memory pressure.
+**Hypothesis:** Objects are collectible but are being created faster than the GC can
+reclaim them, causing sustained memory pressure.
 
-Ask the developer to run:
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "dumpgen 2"
 ```
-dumpgen 0
-dumpgen 1
-dumpgen 2
-```
-
-Gen 2 is the critical one — objects here survived multiple GC cycles. High Gen 2 count
-of short-lived types indicates they're being promoted too fast.
-
-Also check:
-```
-gcheapstat
+```bash
+dotnet-dump analyze <path>/memleak.dmp -c "gcheapstat"
 ```
 
-Look at Gen 2 size and LOH size relative to total heap.
+High Gen 2 count for a type that should be short-lived means objects are being promoted
+through GC generations too quickly. A large LOH size indicates fragmentation from large
+allocations (objects > 85 KB go directly to the LOH and are rarely compacted).
 
-**Fix pattern:** Object pooling (`ArrayPool<T>`, `ObjectPool<T>`), reducing allocations
-in hot paths, using `Span<T>` and `Memory<T>` to avoid heap allocations.
+**Fix pattern:** `ArrayPool<T>`, `ObjectPool<T>`, `Span<T>`/`Memory<T>` to reduce heap
+allocations in hot paths.
 
 ---
 
 ## Stage 3: Root Cause & Fix
 
-**Goal:** Produce a clear, actionable finding that the developer can act on immediately.
-
-When investigation converges on a root cause, produce this report:
+When the investigation converges on a root cause, produce this report:
 
 ```
 ## Memory Leak Root Cause
 
 **Symptom**: [what the developer observed]
-**Leaking type**: [fully qualified type name]
+**Leaking type**: [fully qualified name]
 **Instance count**: [from dumpheap]
-**Memory retained**: [TotalSize from dumpheap]
-**Why GC can't collect it**: [the gcroot chain in plain English]
+**Memory retained**: [TotalSize]
+**Why GC cannot collect it**: [gcroot chain in plain English]
 
-**Root cause**: [one clear sentence — e.g., "CustomerCache subscribes to
-ApplicationEvents.OnRequest but never unsubscribes, so every CustomerCache
-instance created during the app's lifetime remains alive."]
+**Root cause**: [one specific sentence]
 
 **Fix**:
-[before/after code showing exactly what to change]
+[before/after code]
 
-**How to verify the fix worked**:
-[e.g., "After deploying, collect a new dump after 30 minutes of load and
-run dumpheap -stat — CustomerCache count should stay below 10."]
+**How to verify the fix**:
+[e.g., "Collect a new dump after 30 minutes of load — the count of X should
+stay stable below 10"]
 
 **Pattern to prevent recurrence**:
-[e.g., "Any class that subscribes to events in its constructor must implement
-IDisposable and unsubscribe in Dispose()."]
+[rule to apply across the codebase]
 ```
 
-Ask the developer if the fix makes sense given their codebase. They may have context that
-changes the approach (e.g., the static collection is intentional, but needs an eviction
-policy).
+Ask the developer whether the fix fits their design — they may have context that changes
+the approach (e.g., the static collection is intentional but needs an eviction policy).
 
 ---
 
-## Handling Blockers — What to Do When the Developer Can't Proceed
+## When the Investigation Stalls
 
-These are common situations where the developer is stuck. Handle each one directly.
+After 3+ commands with no new information:
 
-### "I don't have access to the server to collect a dump"
-
-Ask:
-1. Is the app in Docker, Kubernetes, or a remote VM?
-2. Do they have SSH, `kubectl exec`, or RDP access?
-3. Can they ask someone who does have access to run the collect command?
-
-For Docker/Kubernetes specifics, read `references/docker.md` and walk them through it.
-For remote VM: give them a self-contained script they can hand to the server team.
-
-### "dotnet-dump collect fails — permission denied / ptrace error"
-
-Ask them to run:
-```
-ps aux | grep dotnet
-```
-to see which OS user owns the process. Then give them the exact command:
-```
-sudo -u <process-owner> dotnet-dump collect -p <PID> --type Heap -o /tmp/dump.dmp
-```
-If sudo isn't available, ask them to try as root. If ptrace is blocked by container
-policy, read `references/docker.md`.
-
-### "The output is really long / terminal cut it off"
-
-Ask them to save to a file first:
-```
-logopen /tmp/dumplog.txt
-<the command>
-logclose
-```
-Then paste the file contents:
-```
-cat /tmp/dumplog.txt
-```
-
-### "gcroot is hanging / taking forever"
-
-Normal on heaps > 2 GB. Options:
-- Wait — it will finish (may take several minutes)
-- Try the faster variant: `gcroot -nofields <address>`
-- Sample instead: run gcroot on just 2-3 addresses of the leaking type — the chain will
-  be identical for all instances of the same leak pattern
-
-### "The app isn't showing the leak right now"
-
-Two options — ask the developer which fits:
-
-**Option A — Wait and collect:** Does their monitoring (Prometheus, Datadog, Task Manager)
-show when memory peaks? Plan to collect a dump at that time. Walk them through what to run
-in advance so they're ready when the moment comes.
-
-**Option B — Code review mode:** Ask them to share the relevant C# source files. Switch
-to static analysis using the known leak patterns. Less definitive, but can narrow the
-investigation significantly.
-
-### "dotnet-dump analyze opens but I get SOS errors"
-
-Ask them to run inside the session:
-```
-setsymbolserver -ms
-```
-This downloads the correct DAC/SOS from Microsoft's public symbol server. Requires
-internet access from the machine running dotnet-dump.
-
-For offline environments or persistent errors, read `references/troubleshooting.md`.
+1. **Check dump timing** — was the dump collected while memory was actually elevated? If
+   it was collected too early, the evidence is not there. Ask the developer to trigger load,
+   then collect a new dump at peak.
+2. **Recheck the baseline** — return to `dumpheap -stat`. The type with the highest
+   TotalSize is almost always the right starting point.
+3. **Compare two dumps** — collect a second dump after more time or load. The delta in
+   `dumpheap -stat` output directly reveals the leaking type.
+4. **Read source code** — for the suspect type, reading the implementation often makes
+   the leak immediately obvious.
+5. **Ask the developer** — if still unclear after reading the code, ask precisely:
+   *"Where is `X` created, and what is responsible for disposing it?"*
+   Never leave the developer without a clear next step.
 
 ---
 
-## If the Investigation Stalls
+## Tips
 
-If 3+ commands in a row produce no new information:
-
-1. **Check dump timing**: Was the dump collected while memory was actually elevated?
-   If collected before the leak manifested, the evidence won't be there.
-   → Collect a new dump at peak memory.
-
-2. **Recheck the baseline**: Go back to `dumpheap -stat`. Are we investigating the
-   right type? The top TotalSize type is almost always the right starting point.
-
-3. **Compare two dumps**: Collect a second dump after more time/load and compare the
-   `dumpheap -stat` delta. The types that grew are the leak.
-
-4. **Switch to code review**: Ask the developer to share source files for the suspicious
-   types. The code often makes the leak obvious once you know which class to look at.
-
-5. **State the impasse clearly**: Tell the developer exactly what additional information
-   would unblock the investigation, and what their options are.
-   Never leave them with "I don't know" and no next step.
-
----
-
-## Tips for This Workflow
-
-**Tone:**
-- Be direct and procedural — this is a diagnostic session, not a tutorial
-- Explain the *why* briefly when it affects what the developer should do
-- Don't try to teach SOS internals — focus on finding the leak
-
-**Pacing:**
-- One command at a time. Wait for output before giving the next command.
-- After every output, state: (1) what it shows, (2) what it rules out,
-  (3) what the next command will check
-- Summarize progress every 4-5 commands
-
-**If the developer wants to move faster:**
-Acknowledge it. Offer to give 2-3 commands at once if they're comfortable running them
-in sequence and pasting all output together. Adjust to their preference.
-
-**If the developer seems lost:**
-Remind them they don't need to understand the output — just run and paste. Their job is
-execution; interpretation is the agent's job.
+- Read source code before asking the developer — most business questions answer themselves
+  from the implementation.
+- Notify the developer before any action with side effects: collecting a dump (memory
+  spike), collecting a Full dump (very large file, may slow the app).
+- When asking the developer to trigger behavior, be specific:
+  *"Please [perform action X in the UI / call endpoint Y with payload Z] about 10 times
+  to build up enough pressure for the leak to be visible in the dump."*
+- Summarize after every 4–5 commands: what has been confirmed, what has been ruled out,
+  and what the current focus is.
+- Never leave the developer without knowing what the next step is.
 
 ---
 
@@ -577,6 +448,5 @@ execution; interpretation is the agent's job.
 
 - `references/docker.md` — Collecting dumps from Docker/Kubernetes containers
 - `references/troubleshooting.md` — SOS errors, ptrace issues, symbol problems
-- `references/sos-commands.md` — Full SOS command reference for when deeper
-  investigation is needed beyond the standard paths above
-- `references/install.md` — Platform-specific install commands (no SDK required)
+- `references/sos-commands.md` — Full SOS command reference
+- `references/install.md` — Installing dotnet-dump without the .NET SDK
