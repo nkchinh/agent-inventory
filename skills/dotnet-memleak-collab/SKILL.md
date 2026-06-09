@@ -58,28 +58,36 @@ Briefly confirm the plan and outline three stages:
 
 If the developer already has a `.dmp` file: ask for the path and jump to Stage 2.
 
+**Regardless of how much information the developer has already provided** (including a
+PID, process name, or even a full command), always complete the triage questions in
+Step 1 before taking any technical action. A dump collected at the wrong moment — before
+the leak has materialized — produces a clean heap and reveals nothing. Two triage
+questions cost seconds; a useless dump wastes the entire session.
+
 ---
 
 ## Stage 1: Setup & Collect
 
-**Goal:** Install dotnet-dump if needed, identify the correct process, capture a dump,
-and determine whether the leak is already visible — before asking the developer to do
-anything in the app.
+**Goal:** Understand the symptom and current app state first, then install dotnet-dump
+if needed, capture a dump, and determine whether the leak is already visible.
 
-### Step 1: Triage
+### Step 1: Triage — mandatory before any action
 
-Ask the developer only what cannot be determined from code or the environment:
+**Do not run any commands yet.** Even if the developer already provided a PID or process
+name, ask these two questions first:
 
 1. What exactly is the symptom? (memory grows without bound / OOM crash / app hangs /
    abnormally high stable baseline)
-2. Is the app running right now, or does the developer need to start it first?
+2. Is the leak happening right now, or did it happen earlier? Is the app currently in a
+   state where the symptom is active?
 
-Do not ask how to reproduce the leak yet. The agent collects a dump first and checks
-whether the leak is already visible. Only if the heap looks clean does it make sense to
-ask the developer to trigger load.
+These questions determine whether a dump collected right now will contain useful evidence.
+Without them, the agent cannot know if collecting immediately makes sense.
 
 While waiting for the answer, the agent proactively reads the project structure, identifies
 the app type (.NET version, hosting model), and checks whether dotnet-dump is installed.
+
+**Only after receiving answers to both questions**, proceed to Step 2.
 
 ### Step 2: Check and install dotnet-dump
 
