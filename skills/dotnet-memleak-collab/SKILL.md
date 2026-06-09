@@ -218,7 +218,48 @@ be chained: `-c "cmd1" -c "cmd2" -c "exit"`.
 The developer is only needed when the agent has a business question or needs additional
 behavior triggered in the app.
 
-### Step 1: Runtime sanity check
+### Communication Protocol
+
+The agent runs multiple commands autonomously, but the developer must not be left in the
+dark. Report at every **decision point**, not after every command. Keep each update to
+2–4 lines — enough to orient, not enough to overwhelm.
+
+**When to report and what to say:**
+
+| Trigger | What to communicate |
+|---|---|
+| After `dumpheap -stat` | Top 2–3 suspect types with counts and sizes. Current hypothesis in one sentence. |
+| Before branching to an Investigation Path | Which path and why: *"gcroot shows a static field holding this — investigating static collection leak."* |
+| After each `gcroot` / `dumpobj` | What the result confirmed or ruled out. Updated hypothesis if it changed. |
+| When about to ask the developer to do something | Brief summary of what's been found so far before making the request. |
+| When stuck or changing direction | Explicitly state what was ruled out and why the direction is changing. |
+
+**Format — keep it short:**
+```
+▶ [What was just run and what it showed]
+→ [What this means / hypothesis update]
+→ [What comes next and why]
+```
+
+Example after `dumpheap -stat`:
+```
+▶ Heap baseline: 180k String objects (22 MB), 95k CustomerSession objects (38 MB)
+→ CustomerSession count is abnormally high for a session cache — likely not being released
+→ Running gcroot on a CustomerSession instance to find what's holding it alive
+```
+
+Example after branching to a path:
+```
+▶ gcroot shows: static field AppState._activeSessions → Dictionary → CustomerSession
+→ Confirmed static collection leak — the dictionary accumulates entries with no eviction
+→ Inspecting the dictionary and reading AppState source code
+```
+
+**Silent commands** — do not report after these unless they reveal something unexpected:
+`eeversion`, `ls`, installation steps, confirm-file-exists checks. These are housekeeping;
+reporting on them adds noise without value.
+
+
 
 ```bash
 dotnet-dump analyze <path>/memleak.dmp -c "eeversion" -c "exit"
@@ -497,8 +538,6 @@ After 3+ commands with no new information:
 - When asking the developer to trigger behavior, be specific:
   *"Please [perform action X in the UI / call endpoint Y with payload Z] about 10 times
   to build up enough pressure for the leak to be visible in the dump."*
-- Summarize after every 4–5 commands: what has been confirmed, what has been ruled out,
-  and what the current focus is.
 - Never leave the developer without knowing what the next step is.
 
 ---
