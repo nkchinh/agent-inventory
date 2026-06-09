@@ -147,9 +147,11 @@ ls -lh <chosen-path>/memleak_1.dmp
 
 ### Step 5: Quick heap check — decide whether to ask for load
 
-Immediately run a quick heap check on the first dump:
+Immediately run a quick heap check on the first dump. Note: always end analyze commands
+with `-c "exit"` so dotnet-dump exits instead of waiting for interactive input.
+
 ```bash
-dotnet-dump analyze <path>/memleak_1.dmp -c "dumpheap -stat"
+dotnet-dump analyze <path>/memleak_1.dmp -c "dumpheap -stat" -c "exit"
 ```
 
 **If the leak is already visible** (suspicious app types with high Count or TotalSize):
@@ -175,8 +177,12 @@ dotnet-dump collect -p <PID> --type Heap -o <chosen-path>/memleak_2.dmp
 
 The agent runs all SOS commands autonomously using non-interactive mode:
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "<command>"
+dotnet-dump analyze <path>/memleak.dmp -c "<command>" -c "exit"
 ```
+
+**Always end with `-c "exit"`** — without it, dotnet-dump drops into an interactive
+session waiting for console input, which the agent cannot handle. Multiple commands can
+be chained: `-c "cmd1" -c "cmd2" -c "exit"`.
 
 The developer is only needed when the agent has a business question or needs additional
 behavior triggered in the app.
@@ -184,7 +190,7 @@ behavior triggered in the app.
 ### Step 1: Runtime sanity check
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "eeversion"
+dotnet-dump analyze <path>/memleak.dmp -c "eeversion" -c "exit"
 ```
 
 Confirms the .NET runtime version and that SOS loaded correctly. If SOS errors appear,
@@ -193,7 +199,7 @@ see `references/troubleshooting.md` before continuing.
 ### Step 2: Baseline heap — most important command
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -stat"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -stat" -c "exit"
 ```
 
 Analyze the full output before reporting anything:
@@ -216,12 +222,12 @@ Report to the developer:
 ### Step 3: Drill into the suspect type
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <PartialTypeName> -stat"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <PartialTypeName> -stat" -c "exit"
 ```
 
 Get instance addresses:
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <PartialTypeName>"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <PartialTypeName>" -c "exit"
 ```
 
 Pick 2–3 addresses to continue with.
@@ -229,7 +235,7 @@ Pick 2–3 addresses to continue with.
 ### Step 4: Find why the GC cannot collect it
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "gcroot <address>"
+dotnet-dump analyze <path>/memleak.dmp -c "gcroot <address>" -c "exit"
 ```
 
 This is the core diagnostic question: *why is this object still alive?*
@@ -259,7 +265,7 @@ responsible for holding the reference are usually visible immediately.
 cleared.
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpobj <root-owner-address>"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpobj <root-owner-address>" -c "exit"
 ```
 
 Look for fields of type `List<T>`, `Dictionary<K,V>`, `ConcurrentDictionary`, `Queue<T>`.
@@ -268,7 +274,7 @@ collection ever cleared?
 
 Drill deeper into the collection if needed:
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpobj <collection-address>"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpobj <collection-address>" -c "exit"
 ```
 
 Ask the developer only when intent cannot be inferred from code:
@@ -287,7 +293,7 @@ Ask the developer only when intent cannot be inferred from code:
 holds a delegate pointing to the subscriber, preventing GC from collecting it.
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpdelegate <delegate-address>"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpdelegate <delegate-address>" -c "exit"
 ```
 
 Identify the subscriber type and method. Read the subscriber's source code: does it
@@ -315,14 +321,14 @@ public void Dispose()
 They queue up for finalization instead of being released immediately.
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "finalizequeue"
+dotnet-dump analyze <path>/memleak.dmp -c "finalizequeue" -c "exit"
 ```
 
 Large counts of `SqlConnection`, `FileStream`, `HttpClient`, `StreamReader`, or `Timer`
 confirm the hypothesis. Follow up with a count for the specific type:
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <TypeFromFinalizeQueue> -stat"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type <TypeFromFinalizeQueue> -stat" -c "exit"
 ```
 
 Read the source code to find where that type is created without a `using` block or
@@ -341,7 +347,7 @@ using var cmd = new SqlCommand(query, conn);
 object from being collected.
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "timerinfo"
+dotnet-dump analyze <path>/memleak.dmp -c "timerinfo" -c "exit"
 ```
 
 A large timer count, or timers pointing to types that should be short-lived, confirms the
@@ -363,10 +369,10 @@ public void Dispose()
 an await that never completes.
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpasync"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpasync" -c "exit"
 ```
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type System.Threading.Tasks.Task -stat"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -type System.Threading.Tasks.Task -stat" -c "exit"
 ```
 
 Many state machines stuck at the same await point indicates resource exhaustion blocking
@@ -386,10 +392,10 @@ then collect a fresh dump.
 reclaim them, causing sustained memory pressure.
 
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "dumpgen 2"
+dotnet-dump analyze <path>/memleak.dmp -c "dumpgen 2" -c "exit"
 ```
 ```bash
-dotnet-dump analyze <path>/memleak.dmp -c "gcheapstat"
+dotnet-dump analyze <path>/memleak.dmp -c "gcheapstat" -c "exit"
 ```
 
 High Gen 2 count for a type that should be short-lived means objects are being promoted
