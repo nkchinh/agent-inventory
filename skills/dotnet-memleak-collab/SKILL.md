@@ -103,9 +103,32 @@ Agent runs:
 dotnet-dump ps
 ```
 
-- Single dotnet process → use that PID
-- Multiple processes → match by command-line args. If still ambiguous, ask the developer
-- No processes → ask whether the app is actually running
+`dotnet-dump ps` only lists .NET Core / .NET 5+ processes. It does not show .NET
+Framework processes — but `dotnet-dump collect` still works on them if given the PID
+directly.
+
+**Interpret the output:**
+
+- Expected process is listed → use that PID, proceed
+- Multiple processes listed → match by command-line args. If still ambiguous, ask the
+  developer which one is the target app
+- Process is missing or list is empty → do not assume the app is not running. It may be
+  a .NET Framework process. Find the PID using OS tools:
+
+  On Windows:
+  ```bash
+  tasklist /FI "IMAGENAME eq <AppName>.exe"
+  # or for all dotnet-related processes:
+  tasklist | findstr -i "dotnet\|<AppName>"
+  ```
+
+  On Linux/macOS:
+  ```bash
+  ps aux | grep -i "<AppName>"
+  ```
+
+  If the process is found this way, use that PID directly with `dotnet-dump collect`.
+  Only ask the developer if the process genuinely cannot be found by any of the above.
 
 ### Step 4: Collect a first dump immediately
 
