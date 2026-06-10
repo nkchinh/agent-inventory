@@ -17,6 +17,18 @@ The agent and the app run on the same machine, in the developer's local environm
 The agent has CLI access, can read source code in the working directory, and can install
 and run dotnet-dump directly — no need to ask the developer to do these things.
 
+**CRITICAL — every `dotnet-dump analyze` call must end with `-c "exit"`:**
+```bash
+# CORRECT
+dotnet-dump analyze app.dmp -c "dumpheap -stat" -c "exit"
+
+# WRONG — drops into interactive mode and blocks indefinitely
+dotnet-dump analyze app.dmp -c "dumpheap -stat"
+```
+Without `-c "exit"`, dotnet-dump opens an interactive session waiting for console input.
+The agent cannot interact with it and the session hangs. This rule applies to every single
+`dotnet-dump analyze` invocation throughout this skill, no exceptions.
+
 **Agent does autonomously — never ask the developer:**
 - Check whether dotnet-dump is installed; install it if missing
 - Run `dotnet-dump ps` to find the target PID
@@ -50,13 +62,18 @@ agent analyzes from that file — all subsequent steps proceed as normal.
 
 **Opening:**
 
-Briefly confirm the plan and outline three stages:
+Briefly confirm the plan and outline the stages:
 1. **Setup & Collect** — install dotnet-dump if needed, capture a dump while the symptom
    is active
 2. **Investigate** — analyze the dump, trace the root cause
 3. **Fix** — produce a specific code fix and a way to verify it worked
+4. **Verify** — after the fix is applied, confirm the leak is gone under real load
 
 If the developer already has a `.dmp` file: ask for the path and jump to Stage 2.
+
+If the developer says the fix has been applied and wants to confirm it worked
+("run another round", "verify the fix", "check again"): jump directly to Stage 4.
+Do not collect a dump and declare the leak gone without triggering load first.
 
 **Regardless of how much information the developer has already provided** (including a
 PID, process name, or even a full command), always complete the triage questions in
@@ -510,7 +527,69 @@ the approach (e.g., the static collection is intentional but needs an eviction p
 
 ---
 
-## When the Investigation Stalls
+## Stage 4: Verification
+
+**When to enter this stage:**
+The developer says the fix has been applied and wants to confirm the leak is gone —
+either with phrases like "I've fixed it, can you verify?", "run another round", or
+"check again with PID X".
+
+**Do not treat verification like a fresh investigation.** A freshly restarted app will
+always have a clean heap. Collecting a dump immediately and concluding "no leak found"
+is meaningless — it proves nothing.
+
+The correct verification flow is always:
+
+### Step 1: Establish a clean baseline
+
+Collect a dump before triggering any load:
+```bash
+dotnet-dump collect -p <PID> --type Heap -o <chosen-path>/verify_baseline.dmp
+dotnet-dump analyze <chosen-path>/verify_baseline.dmp -c "dumpheap -stat" -c "exit"
+```
+
+Note the counts of the previously leaking types. This is the starting point.
+
+### Step 2: Ask the developer to reproduce the leak scenario
+
+Ask the developer to trigger exactly the same flow that caused the original leak:
+> *"To verify the fix, please [perform the same action that caused the leak — be specific:
+> navigate to X, run workflow Y, call endpoint Z] about the same number of times as
+> before. This ensures we're testing under comparable conditions. Let me know when done."*
+
+Do not skip this step. A clean dump after no load proves nothing.
+
+### Step 3: Collect a post-load dump and compare
+
+After the developer confirms:
+```bash
+dotnet-dump collect -p <PID> --type Heap -o <chosen-path>/verify_after.dmp
+dotnet-dump analyze <chosen-path>/verify_after.dmp -c "dumpheap -stat" -c "exit"
+```
+
+Compare the counts of the previously leaking types between `verify_baseline` and
+`verify_after`.
+
+**Interpreting the result:**
+
+| Observation | Conclusion |
+|---|---|
+| Count of previously leaking type is stable or low | Fix confirmed — leak is resolved |
+| Count grew but is much smaller than before | Partial fix — the original leak is reduced but another source may remain |
+| Count grew at the same rate as before | Fix did not work — return to Stage 2 with the new dump |
+| A different type now dominates TotalSize | Original leak fixed, but a secondary leak has surfaced — investigate the new type |
+
+Report the result clearly with the before/after numbers:
+```
+▶ Verified: CustomerSession count went from 12 (baseline) to 18 (after load) — stable.
+→ Previously it grew to 95,000 under the same load. Fix confirmed.
+```
+
+or if not resolved:
+```
+▶ CustomerSession count reached 94,500 after load — same pattern as before.
+→ The fix did not take effect. Returning to investigation with the new dump.
+```
 
 After 3+ commands with no new information:
 
