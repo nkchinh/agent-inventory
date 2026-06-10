@@ -29,6 +29,22 @@ Without `-c "exit"`, dotnet-dump opens an interactive session waiting for consol
 The agent cannot interact with it and the session hangs. This rule applies to every single
 `dotnet-dump analyze` invocation throughout this skill, no exceptions.
 
+**CRITICAL — always analyze dump and source code together:**
+Dump analysis alone identifies *what* is happening — which types exist, how many, what
+holds them. Source code explains *why* — the developer's intent, ownership model, and
+lifecycle design. Neither is sufficient on its own.
+
+The mandatory dual-track approach:
+- After identifying suspect types from `dumpheap -stat` → immediately read their source
+  before forming any hypothesis
+- After getting a `gcroot` chain → read the source of every class in that chain to
+  understand ownership intent, not just ownership fact
+- When a dump result is ambiguous → the source code usually disambiguates it
+- When source code shows a suspicious pattern → verify it in the dump before concluding
+
+Never report a hypothesis to the developer based on dump data alone without first
+checking whether the source code confirms, contradicts, or adds context to it.
+
 **Agent does autonomously — never ask the developer:**
 - Check whether dotnet-dump is installed; install it if missing
 - Run `dotnet-dump ps` to find the target PID
@@ -245,11 +261,11 @@ dark. Report at every **decision point**, not after every command. Keep each upd
 
 | Trigger | What to communicate |
 |---|---|
-| After `dumpheap -stat` | Top 2–3 suspect types with counts and sizes. Current hypothesis in one sentence. |
-| Before branching to an Investigation Path | Which path and why: *"gcroot shows a static field holding this — investigating static collection leak."* |
-| After each `gcroot` / `dumpobj` | What the result confirmed or ruled out. Updated hypothesis if it changed. |
-| When about to ask the developer to do something | Brief summary of what's been found so far before making the request. |
-| When stuck or changing direction | Explicitly state what was ruled out and why the direction is changing. |
+| After `dumpheap -stat` + source read | Top 2–3 suspect types with counts, sizes, **and what the source says about their expected lifetime**. Hypothesis as a discrepancy between dump and source. |
+| Before branching to an Investigation Path | Which path and why — include both the dump evidence and the source pattern that supports it. |
+| After each `gcroot` / `dumpobj` + source read | What the chain confirmed, what the source says about that ownership, and whether they're consistent. |
+| When about to ask the developer to do something | Brief summary of dump findings + source reading so far before making the request. |
+| When stuck or changing direction | Explicitly state what was ruled out in both dump and source, and why the direction is changing. |
 
 **Format — keep it short:**
 ```
@@ -285,28 +301,33 @@ dotnet-dump analyze <path>/memleak.dmp -c "eeversion" -c "exit"
 Confirms the .NET runtime version and that SOS loaded correctly. If SOS errors appear,
 see `references/troubleshooting.md` before continuing.
 
-### Step 2: Baseline heap — most important command
+### Step 2: Baseline heap + source code — always in parallel
 
 ```bash
 dotnet-dump analyze <path>/memleak.dmp -c "dumpheap -stat" -c "exit"
 ```
 
-Analyze the full output before reporting anything:
+**Do not form any hypothesis from the dump numbers alone.** Before interpreting counts
+and sizes, read the source code for every app type that appears in the top results.
+The dump shows what exists; the source shows whether that makes sense given the design.
 
-1. Sort mentally by `TotalSize` (rightmost column)
-2. Find the top 3–5 types by total memory consumed
-3. Separate app types (app namespace) from framework types (`System.*`)
-4. Flag any type with Count > 50,000 or TotalSize > 50 MB
-5. Note names containing: Cache, Session, Handler, Context, Manager, Repository
+Work through both simultaneously:
 
-Cross-reference with source code: find the corresponding class, read the implementation,
-and form an initial hypothesis before running the next command.
+1. Sort output by `TotalSize` (rightmost column)
+2. For each suspicious app type (Count > 50,000 or TotalSize > 50 MB):
+   - Find the class in source code
+   - Read its constructor, `Dispose()`, fields that are collections or event subscriptions
+   - Identify its intended lifetime (per-request? singleton? per-session? scoped?)
+3. Focus on app namespace types — `System.*` types are rarely the root cause
+4. Names containing Cache, Session, Handler, Context, Manager, Repository are high-value
 
-Report to the developer:
-- What the top consumers are
-- Which types look suspicious and why
-- Current hypothesis in plain language
-- What the next command will test
+After reading both dump output and source code, report the discrepancy — not just the
+number:
+> *"There are 95,000 CustomerSession objects (38 MB). The source shows CustomerSession
+> is constructed per HTTP request, but I don't see a Dispose() or any cleanup path.
+> This is inconsistent with a request-scoped lifetime — something is holding them alive."*
+
+This is the hypothesis. The next steps confirm it.
 
 ### Step 3: Drill into the suspect type
 
@@ -329,6 +350,11 @@ dotnet-dump analyze <path>/memleak.dmp -c "gcroot <address>" -c "exit"
 
 This is the core diagnostic question: *why is this object still alive?*
 
+Immediately after getting the gcroot chain, read the source code of every class that
+appears in that chain — not just the leaking type, but the owner, the owner's owner, and
+so on up to the root. The chain in the dump shows ownership fact; the source code shows
+ownership intent. The leak is at the point where the two diverge.
+
 Interpret the root chain and branch to the matching investigation path:
 
 | Root chain shows | Interpretation | Path |
@@ -340,9 +366,6 @@ Interpret the root chain and branch to the matching investigation path:
 | Async state machine / Task | Incomplete async chain | → Path E |
 | Thread → active local var | Object currently in use — expected | Try another address |
 | No roots found | Object IS collectible — creation rate is the issue | → Path F |
-
-Before branching: cross-reference the gcroot chain with source code. The class and field
-responsible for holding the reference are usually visible immediately.
 
 ---
 
