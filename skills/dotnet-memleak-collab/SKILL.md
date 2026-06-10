@@ -292,7 +292,104 @@ Example after branching to a path:
 `eeversion`, `ls`, installation steps, confirm-file-exists checks. These are housekeeping;
 reporting on them adds noise without value.
 
+### Token Efficiency
 
+Dump analysis output is large. Uncontrolled, a single session can consume enormous token
+budget on data that adds no diagnostic value. Apply these rules to every command.
+
+**Rule 1: Chain related commands in one invocation**
+
+Each `dotnet-dump analyze` call has significant startup overhead. Batch commands that
+logically belong together:
+```bash
+# Good — one invocation, two commands
+dotnet-dump analyze app.dmp -c "eeversion" -c "dumpheap -stat" -c "exit"
+
+# Wasteful — two separate startups for commands that could be chained
+dotnet-dump analyze app.dmp -c "eeversion" -c "exit"
+dotnet-dump analyze app.dmp -c "dumpheap -stat" -c "exit"
+```
+
+**Rule 2: Always use `-stat` before listing instances**
+
+`dumpheap -type X` without `-stat` dumps every instance address — potentially thousands
+of lines. Always confirm count and size with `-stat` first, then get addresses only if
+needed, piped through `head`:
+```bash
+# Step 1: confirm it is worth investigating
+dotnet-dump analyze app.dmp -c "dumpheap -type CustomerSession -stat" -c "exit"
+
+# Step 2: get a sample of addresses only after confirming high count
+dotnet-dump analyze app.dmp -c "dumpheap -type CustomerSession" -c "exit" | head -20
+```
+
+**Rule 3: Sample gcroot — never run it on all instances**
+
+`gcroot` output can be large. All instances of the same leaking type share the same root
+chain pattern. Run `gcroot` on 2–3 addresses maximum. If the chains differ between
+instances, that divergence is itself a data point — investigate the differing root, not
+more instances.
+
+**Rule 4: Prefer `-nofields` for gcroot by default**
+
+`gcroot` by default resolves field names, adding significant output length. Use the
+faster, smaller variant unless field names are specifically needed:
+```bash
+dotnet-dump analyze app.dmp -c "gcroot -nofields <address>" -c "exit"
+```
+Switch to full `gcroot` only if type names alone are not enough to identify the owner.
+
+**Rule 5: Write output to file, then use text tools to extract what matters**
+
+When an agent runs a CLI command, the entire stdout is placed into the context window
+at once — no streaming, no pagination. If the output is too large, it is truncated
+silently. Everything that enters the context stays there for the rest of the session.
+
+For any command that produces more than ~30 lines, the correct pattern is:
+
+```
+write full output to file -> use text search/filter tools to extract relevant lines -> read only the small result
+```
+
+This is better than reading raw output because:
+- The file can be queried multiple times with different filters without re-running the expensive dump command
+- Only the extracted lines enter the context, not the full output
+- Two dump files can be diffed to show what changed between collections
+
+Agents already know how to use grep, awk, findstr, Select-String, diff, and similar
+text tools — apply that knowledge here. The key decision is which commands warrant
+writing to file vs reading directly:
+
+| Command | Approach |
+|---|---|
+| `dumpheap -stat` | Write to file, filter to app namespace types |
+| `dumpheap -type X` (addresses) | Write to file, extract first column |
+| `dumpheap -type X -stat` | Read directly — always short |
+| `finalizequeue` | Write to file, filter for known resource types |
+| `dumpasync` | Write to file, filter out Running state machines |
+| `clrstack -all` | Write to file, filter for blocked/waiting frames |
+| `gcroot` / `gcroot -nofields` | Read directly — tree structure must stay intact |
+| `dumpobj` | Read directly — always short |
+| `eeversion` | Read directly — single line |
+
+For two-dump comparison, write both to file and use diff tools to show the delta in
+object counts — this is far more efficient than reading and mentally comparing two
+large stat outputs.
+
+**Rule 6: Do not run broad commands speculatively**
+
+`clrstack -all`, `eestack`, `dumpasync`, `gcheapstat`, `timerinfo` produce large outputs.
+Run these only when the investigation path specifically calls for them — not as a general
+sweep. Each speculative broad command that reveals nothing is pure token waste even when
+its output goes to a file, because the extraction step still consumes time and context.
+
+**Rule 7: Read `dumpheap -stat` selectively**
+
+After extracting app namespace types from the file, focus analysis on the top 10–15
+entries by `TotalSize`. Lines below that are typically small framework types that are
+not leak candidates.
+
+### Step 1: Runtime sanity check
 
 ```bash
 dotnet-dump analyze <path>/memleak.dmp -c "eeversion" -c "exit"
