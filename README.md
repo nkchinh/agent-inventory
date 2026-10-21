@@ -15,6 +15,7 @@ npx skills add nkchinh/agent-inventory --skill <skill-name>
 | Skill Name | Description |
 | :--- | :--- |
 | **dotnet-memleak-collab** | Collaborative human-agent workflow for diagnosing .NET memory leaks and deadlocks using `dotnet-dump`. |
+| **mermaid-diagrams** | Create, validate and refine Mermaid diagrams for software work, including flowcharts, sequence, class, ER, state, C4, architecture, Gantt, git graph, mindmap, and more. |
 
 ### Detailed Skill Info
 
@@ -27,6 +28,14 @@ A structured investigation session where the agent provides expert direction and
 **How to add:**
 ```bash
 npx skills add nkchinh/agent-inventory --skill dotnet-memleak-collab
+```
+
+#### `mermaid-diagrams`
+Create, validate and refine Mermaid diagrams for software work. Use this for system architecture, database schemas, code structure, API flows, state machines, and user flows.
+
+**How to add:**
+```bash
+npx skills add nkchinh/agent-inventory --skill mermaid-diagrams
 ```
 
 ---

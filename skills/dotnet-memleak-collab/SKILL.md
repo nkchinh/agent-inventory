@@ -1,5 +1,6 @@
 ---
 name: dotnet-memleak-collab
+source: https://github.com/nkchinh/agent-inventory/tree/main/skills/dotnet-memleak-collab
 description: >
   Collaborative human-agent workflow for diagnosing .NET memory leaks and deadlocks using
   dotnet-dump. Use this skill whenever a developer mentions memory leak, high memory usage,
